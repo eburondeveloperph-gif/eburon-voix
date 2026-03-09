@@ -1,11 +1,12 @@
-import { GoogleGenAI, ThinkingLevel, Type, Modality } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type, Modality, createPartFromFunctionResponse } from "@google/genai";
+import { executeTool } from "./tools";
 
-const apiKey = process.env.GEMINI_API_KEY;
+const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 export const models = {
-  chat: "gemini-3.1-pro-preview",
-  fast: "gemini-3.1-flash-lite-preview",
+  chat: "gemini-2.5-flash",
+  fast: "gemini-2.5-flash",
   image: "gemini-3.1-flash-image-preview",
   imageBasic: "gemini-2.5-flash-image",
   imagePro: "gemini-3-pro-image-preview",
@@ -45,12 +46,15 @@ export function createChat(
     finalSystemPrompt += `\n\nResponse Style (How you should respond):\n${responseStyle}`;
   }
 
+  const config: Record<string, unknown> = {
+    systemInstruction: finalSystemPrompt,
+  };
+  if (tools.length > 0) {
+    config.tools = [{ functionDeclarations: tools }, { googleSearch: {} }];
+  }
   return ai.chats.create({
     model: models.chat,
-    config: {
-      systemInstruction: finalSystemPrompt,
-      tools: [...tools, { googleSearch: {} }],
-    },
+    config,
   });
 }
 
@@ -66,14 +70,34 @@ export async function* generateChatResponseStream(
   if (!ai) throw new Error("API key not configured");
 
   const chat = createChat(SYSTEM_PROMPT, tools, userContext, responseStyle);
-  const stream = await chat.sendMessageStream({ message: prompt });
+  let message: string | import("@google/genai").Part[] = prompt;
 
-  for await (const chunk of stream) {
-    yield {
-      text: chunk.text,
-      groundingMetadata: chunk.candidates?.[0]?.groundingMetadata,
-      functionCalls: chunk.functionCalls,
-    };
+  while (true) {
+    const stream = await chat.sendMessageStream({ message });
+    let lastChunk: { functionCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }> } | null = null;
+
+    for await (const chunk of stream) {
+      lastChunk = chunk;
+      yield {
+        text: chunk.text,
+        groundingMetadata: chunk.candidates?.[0]?.groundingMetadata,
+        functionCalls: chunk.functionCalls,
+      };
+    }
+
+    const functionCalls = lastChunk?.functionCalls;
+    if (!functionCalls || functionCalls.length === 0) break;
+
+    const parts = [];
+    for (const fc of functionCalls) {
+      try {
+        const result = await executeTool(fc.name!, fc.args || {});
+        parts.push(createPartFromFunctionResponse(fc.id || 'fc', fc.name!, { result }));
+      } catch (err) {
+        parts.push(createPartFromFunctionResponse(fc.id || 'fc', fc.name!, { error: String(err) }));
+      }
+    }
+    message = parts;
   }
 }
 
@@ -98,8 +122,10 @@ export async function generateChatResponse(
 
   const config: any = {
     systemInstruction: finalSystemPrompt,
-    tools: [...tools, { googleSearch: {} }],
   };
+  if (tools.length > 0) {
+    config.tools = [{ functionDeclarations: tools }, { googleSearch: {} }];
+  }
 
   if (useThinking) {
     config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };

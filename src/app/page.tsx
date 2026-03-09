@@ -36,16 +36,14 @@ import {
 } from 'lucide-react';
 import { 
   generateChatResponse, 
-  generateChatResponseStream,
-  generateImage, 
   analyzeImage, 
   textToSpeech, 
   transcribeAudio,
   connectLive,
   editImage,
-  createChat,
-  SYSTEM_PROMPT
 } from '../services/gemini';
+import { generateChatResponseStream } from '../services/ollama';
+import { generateImage } from '../services/flux';
 import { tools, executeTool } from "../services/tools";
 
 declare global {
@@ -166,26 +164,32 @@ export default function App() {
   const [chatHistory, setChatHistory] = useState<any[]>([]);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+  const [authMode, setAuthMode] = useState<'signup' | 'signin'>('signup');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
   
   const [userContext, setUserContext] = useState('');
   const [responseStyle, setResponseStyle] = useState('');
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
+  const [ollamaModel, setOllamaModel] = useState('');
 
   useEffect(() => {
     const savedUserContext = localStorage.getItem('eburon_userContext');
     const savedResponseStyle = localStorage.getItem('eburon_responseStyle');
     const savedTheme = localStorage.getItem('eburon_theme') as 'light' | 'dark' | 'system' || 'system';
+    const savedOllamaModel = localStorage.getItem('eburon_ollamaModel');
     if (savedUserContext) setUserContext(savedUserContext);
     if (savedResponseStyle) setResponseStyle(savedResponseStyle);
     setTheme(savedTheme);
+    if (savedOllamaModel) setOllamaModel(savedOllamaModel);
   }, []);
 
   const saveSettings = () => {
     localStorage.setItem('eburon_userContext', userContext);
     localStorage.setItem('eburon_responseStyle', responseStyle);
     localStorage.setItem('eburon_theme', theme);
+    localStorage.setItem('eburon_ollamaModel', ollamaModel);
     setActiveModal(null);
   };
 
@@ -203,8 +207,16 @@ export default function App() {
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
-    setAuthLoading(true);
     setAuthError('');
+    if (authPassword !== authConfirmPassword) {
+      setAuthError('Passwords do not match');
+      return;
+    }
+    if (authPassword.length < 6) {
+      setAuthError('Password must be at least 6 characters');
+      return;
+    }
+    setAuthLoading(true);
     const { error } = await supabase.auth.signUp({
       email: authEmail,
       password: authPassword,
@@ -632,7 +644,7 @@ export default function App() {
         let groundingMetadata = null;
         
         try {
-          const stream = generateChatResponseStream(textToSend, history, isThinking, isFastMode, userContext, responseStyle, tools);
+          const stream = generateChatResponseStream(textToSend, history, isThinking, isFastMode, userContext, responseStyle, [], ollamaModel || undefined);
           for await (const chunk of stream) {
             fullText += chunk.text || '';
             if (chunk.groundingMetadata) {
@@ -661,8 +673,9 @@ export default function App() {
         }
       }
     } catch (error) {
-      console.error(error);
-      const errorMessage: Message = { role: 'model', text: 'Sorry, something went wrong.' };
+      console.error('Chat error:', error);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const errorMessage: Message = { role: 'model', text: `Sorry, something went wrong. ${errMsg}` };
       setMessages(prev => [...prev, errorMessage]);
       saveMessageToDb(errorMessage);
     } finally {
@@ -1061,11 +1074,11 @@ export default function App() {
             </button>
 
             <div className="flex-1 bg-[#212121] rounded-[24px] flex flex-col justify-end p-2 relative min-h-[52px]">
-              {isThinking && input.length === 0 && (
-                <div className="absolute -top-[42px] left-0 bg-[#202936] text-[#4ba1ff] rounded-full px-3 py-1.5 flex items-center space-x-2 w-max transition-opacity">
-                  <Brain size={16} />
+              {isThinking && (
+                <div className="absolute -top-[42px] left-0 bg-[#202936] text-[#4ba1ff] rounded-full px-3 py-1.5 flex items-center space-x-2 w-max transition-opacity z-10">
+                  <Brain size={16} className="animate-pulse" />
                   <span className="text-[13px] font-medium tracking-wide">Thinking</span>
-                  <button onClick={() => setIsThinking(false)} className="text-[#4ba1ff] hover:text-blue-300 ml-1">
+                  <button onClick={() => setIsThinking(false)} className="text-[#4ba1ff] hover:text-blue-300 ml-1" title="Turn off thinking mode">
                     <X size={14} />
                   </button>
                 </div>
@@ -1425,13 +1438,13 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-black/80 z-[70] flex items-center justify-center p-4"
+              className="absolute inset-0 bg-[#0a0a0a] z-[70] flex flex-col"
             >
               <motion.div 
-                initial={{ scale: 0.95, y: 20 }}
-                animate={{ scale: 1, y: 0 }}
-                exit={{ scale: 0.95, y: 20 }}
-                className="bg-[#1a1a1a] w-full max-w-md rounded-3xl border border-neutral-800 overflow-hidden flex flex-col max-h-[80vh]"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="bg-[#1a1a1a] w-full h-full flex flex-col overflow-hidden"
               >
                 <div className="p-4 border-b border-neutral-800 flex justify-between items-center">
                   <h3 className="font-semibold text-white">
@@ -1467,37 +1480,58 @@ export default function App() {
                         </>
                       ) : (
                         <div className="space-y-4">
-                          <p className="text-white font-medium mb-4 text-center">Sign in to your account</p>
+                          <p className="text-white font-medium mb-4 text-center">
+                            {authMode === 'signup' ? 'Create your account' : 'Sign in to your account'}
+                          </p>
                           {authError && <p className="text-red-400 text-xs text-center">{authError}</p>}
                           <form className="space-y-3" onSubmit={(e) => e.preventDefault()}>
                             <input 
                               type="email" 
                               placeholder="Email" 
                               value={authEmail}
-                              onChange={(e) => setAuthEmail(e.target.value)}
+                              onChange={(e) => { setAuthEmail(e.target.value); setAuthError(''); }}
                               className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600"
                             />
                             <input 
                               type="password" 
                               placeholder="Password" 
                               value={authPassword}
-                              onChange={(e) => setAuthPassword(e.target.value)}
+                              onChange={(e) => { setAuthPassword(e.target.value); setAuthError(''); }}
                               className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600"
                             />
-                            <div className="flex space-x-2 pt-2">
-                              <button 
-                                onClick={handleSignIn}
-                                disabled={authLoading}
-                                className="flex-1 py-2.5 bg-white text-black rounded-xl font-medium hover:bg-neutral-200 transition-colors disabled:opacity-50"
+                            {authMode === 'signup' && (
+                              <input 
+                                type="password" 
+                                placeholder="Confirm password" 
+                                value={authConfirmPassword}
+                                onChange={(e) => { setAuthConfirmPassword(e.target.value); setAuthError(''); }}
+                                className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600"
+                              />
+                            )}
+                            <div className="space-y-2 pt-2">
+                              {authMode === 'signup' ? (
+                                <button 
+                                  onClick={handleSignUp}
+                                  disabled={authLoading}
+                                  className="w-full py-2.5 bg-white text-black rounded-xl font-medium hover:bg-neutral-200 transition-colors disabled:opacity-50"
+                                >
+                                  Create Account
+                                </button>
+                              ) : (
+                                <button 
+                                  onClick={handleSignIn}
+                                  disabled={authLoading}
+                                  className="w-full py-2.5 bg-white text-black rounded-xl font-medium hover:bg-neutral-200 transition-colors disabled:opacity-50"
+                                >
+                                  Sign In
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => { setAuthMode(authMode === 'signup' ? 'signin' : 'signup'); setAuthError(''); setAuthConfirmPassword(''); }}
+                                className="w-full py-2 text-sm text-neutral-400 hover:text-white transition-colors"
                               >
-                                Sign In
-                              </button>
-                              <button 
-                                onClick={handleSignUp}
-                                disabled={authLoading}
-                                className="flex-1 py-2.5 bg-[#212121] text-white border border-neutral-800 rounded-xl font-medium hover:bg-[#2f2f2f] transition-colors disabled:opacity-50"
-                              >
-                                Sign Up
+                                {authMode === 'signup' ? 'Already have an account? Sign in' : "Don't have an account? Create one"}
                               </button>
                             </div>
                           </form>
@@ -1521,6 +1555,25 @@ export default function App() {
                         className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600 min-h-[120px]"
                         placeholder="e.g., Keep responses concise and use code examples..."
                       />
+                      <p className="text-sm text-white mt-4 mb-2">Hosted Model (Ollama)</p>
+                      <input
+                        type="text"
+                        value={ollamaModel}
+                        onChange={(e) => setOllamaModel(e.target.value)}
+                        placeholder="e.g. llama3.2, codemax-beta:latest, mistral"
+                        className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600"
+                      />
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {['llama3.2', 'codemax-beta:latest', 'mistral', 'llama3.1', 'qwen2.5'].map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => setOllamaModel(m)}
+                            className={`px-3 py-1.5 text-xs rounded-lg ${ollamaModel === m ? 'bg-white text-black font-medium' : 'bg-[#212121] text-neutral-400 hover:text-white border border-neutral-800'}`}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
                       <p className="text-sm text-white mt-4 mb-2">Theme</p>
                       <div className="flex bg-[#212121] p-1 rounded-xl border border-neutral-800">
                         {(['light', 'dark', 'system'] as const).map((t) => (
